@@ -66,10 +66,17 @@ class Trainer(object):
             tgt_ids = tgt_ids.cuda()
 
         # get word embeddings
-        src_emb = self.src_emb(Variable(src_ids, volatile=True))
-        tgt_emb = self.tgt_emb(Variable(tgt_ids, volatile=True))
-        src_emb = self.mapping(Variable(src_emb.data, volatile=volatile))
-        tgt_emb = Variable(tgt_emb.data, volatile=volatile)
+        with torch.no_grad():
+            src_emb = self.src_emb(Variable(src_ids))
+            tgt_emb = self.tgt_emb(Variable(tgt_ids))
+        
+        if volatile:
+            with torch.no_grad():
+                src_emb = self.mapping(Variable(src_emb.data))
+                tgt_emb = Variable(tgt_emb.data)
+        else:
+            src_emb = self.mapping(Variable(src_emb.data))
+            tgt_emb = Variable(tgt_emb.data)
 
         # input / target
         x = torch.cat([src_emb, tgt_emb], 0)
@@ -87,7 +94,8 @@ class Trainer(object):
         self.discriminator.train()
 
         # loss
-        x, y = self.get_dis_xy(volatile=True)
+        with torch.no_grad():
+            x, y = self.get_dis_xy(volatile=True)
         preds = self.discriminator(Variable(x.data))
         loss = F.binary_cross_entropy(preds, y)
         stats['DIS_COSTS'].append(loss.data.item())
@@ -148,6 +156,44 @@ class Trainer(object):
                 os.path.join(DIC_EVAL_PATH, filename),
                 word2id1, word2id2
             )
+        # use custom seed dictionary disjoint from evaluation dictionary
+        elif dico_train == "custom_seed":
+            # Load main dictionary file
+            main_filename = '%s-%s.txt' % (self.params.src_lang, self.params.tgt_lang)
+            main_path = os.path.join(DIC_EVAL_PATH, main_filename)
+            
+            # Load evaluation dictionary to ensure disjoint sets
+            eval_filename = '%s-%s.5000-6500.txt' % (self.params.src_lang, self.params.tgt_lang)
+            eval_path = os.path.join(DIC_EVAL_PATH, eval_filename)
+            
+            logger.info(f"Loading custom seed dictionary from {main_path}")
+            logger.info(f"Will ensure it's disjoint from evaluation dictionary {eval_path}")
+            
+            # Load both dictionaries
+            main_dico = load_dictionary(main_path, word2id1, word2id2)
+            eval_dico = load_dictionary(eval_path, word2id1, word2id2)
+            
+            # Create sets of source words in evaluation dictionary
+            eval_src_words = set(eval_dico[:, 0].cpu().numpy())
+            
+            # Filter out words from seed dictionary that appear in evaluation dictionary
+            mask = torch.zeros(main_dico.size(0)).bool()
+            for i in range(main_dico.size(0)):
+                if main_dico[i, 0].item() not in eval_src_words:
+                    mask[i] = True
+            
+            # Apply the mask to keep only disjoint entries
+            filtered_dico = main_dico[mask]
+            
+            # Take only the first 5000 entries (same size as default dictionary)
+            if filtered_dico.size(0) > 5000:
+                logger.info(f"Filtered dictionary has {filtered_dico.size(0)} entries, trimming to 5000")
+                filtered_dico = filtered_dico[:5000]
+            
+            logger.info(f"Original dictionary size: {main_dico.size(0)}")
+            logger.info(f"Filtered seed dictionary size: {filtered_dico.size(0)}")
+            
+            self.dico = filtered_dico
         # dictionary provided by the user
         else:
             self.dico = load_dictionary(dico_train, word2id1, word2id2)
@@ -258,9 +304,10 @@ class Trainer(object):
         # map source embeddings to the target space
         bs = 4096
         logger.info("Map source embeddings to the target space ...")
-        for i, k in enumerate(range(0, len(src_emb), bs)):
-            x = Variable(src_emb[k:k + bs], volatile=True)
-            src_emb[k:k + bs] = self.mapping(x.cuda() if params.cuda else x).data.cpu()
+        with torch.no_grad():
+            for i, k in enumerate(range(0, len(src_emb), bs)):
+                x = Variable(src_emb[k:k + bs])
+                src_emb[k:k + bs] = self.mapping(x.cuda() if params.cuda else x).data.cpu()
 
         # write embeddings to the disk
         export_embeddings(src_emb, tgt_emb, params)

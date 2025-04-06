@@ -14,7 +14,8 @@ import torch
 from ..utils import get_nn_avg_dist
 
 
-DIC_EVAL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'data', 'crosslingual', 'dictionaries')
+# Updated path to match actual dictionaries location
+DIC_EVAL_PATH = '/root/sarvam/theko_MUSE/data/dictionaries'
 
 
 logger = getLogger()
@@ -46,6 +47,9 @@ def load_dictionary(path, word2id1, word2id2):
     Return a torch tensor of size (n, 2) where n is the size of the
     loader dictionary, and sort it by source word frequency.
     """
+    
+    logger.info(f"Attempting to load dictionary from {path}")
+    
     assert os.path.isfile(path)
 
     pairs = []

@@ -124,3 +124,13 @@ Session.vim
 tags
 
 # End of https://www.gitignore.io/api/vim,python
+
+# Ignore all files in the logs directory
+*logs/*
+
+# Ignore all files in the data directory
+data/*
+
+plots/*
+
+*.html
