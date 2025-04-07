@@ -1,0 +1,25 @@
+name: muse_env
+channels:
+  - pytorch
+  - nvidia
+  - plotly
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.8
+  - pytorch
+  - torchvision
+  - torchaudio
+  - cudatoolkit
+  - pytorch-cuda=12.4
+  - plotly
+  - scikit-learn
+  - jupyter
+  - notebook
+  - ipywidgets
+  - pip
+  - pip:
+    - -r requirements.txt
+    
+# To create environment:
+# mamba env create -f environment.yaml 
