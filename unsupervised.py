@@ -212,6 +212,9 @@ parser.add_argument("--visualize_final_alignment", type=bool_flag, default=True,
 parser.add_argument("--viz_dictionary", type=str, default="", help="Path to dictionary for visualization (if different from dico_eval)")
 parser.add_argument("--viz_max_pairs", type=int, default=200, help="Maximum number of pairs for visualization")
 parser.add_argument("--viz_output_dir", type=str, default="plots", help="Directory to save visualization plots")
+# option to skip training and load a pre-trained model directly
+parser.add_argument("--pretrained_mapping", type=str, default="", help="Path to a pre-trained mapping model (.pth file) to skip training and go straight to export")
+parser.add_argument("--skip_training", type=bool_flag, default=False, help="Skip training and use pre-trained model")
 
 
 # parse parameters
@@ -228,6 +231,10 @@ assert os.path.isfile(params.src_emb)
 assert os.path.isfile(params.tgt_emb)
 assert params.dico_eval == 'default' or os.path.isfile(params.dico_eval)
 assert params.export in ["", "txt", "pth"]
+
+# if using pretrained mapping, check that it exists
+if params.skip_training and params.pretrained_mapping:
+    assert os.path.isfile(params.pretrained_mapping), f"Pretrained mapping file not found: {params.pretrained_mapping}"
 
 # build model / trainer / evaluator
 logger = initialize_exp(params)
@@ -247,7 +254,7 @@ if params.plot_results:
 """
 Learning loop for Adversarial Training
 """
-if params.adversarial:
+if params.adversarial and not params.skip_training:
     logger.info('----> ADVERSARIAL TRAINING <----\n\n')
 
     best_valid_metric = -float('inf')
@@ -367,7 +374,7 @@ if params.adversarial:
 """
 Learning loop for Procrustes Iterative Refinement
 """
-if params.n_refinement > 0:
+if params.n_refinement > 0 and not params.skip_training:
     # Get the best mapping according to VALIDATION_METRIC
     logger.info('----> ITERATIVE PROCRUSTES REFINEMENT <----\n\n')
     trainer.reload_best()
@@ -441,9 +448,33 @@ if params.n_refinement > 0:
             save_metrics()
 
 
+# Load the pre-trained model if specified
+if params.skip_training and params.pretrained_mapping:
+    logger.info('----> LOADING PRE-TRAINED MODEL <----\n\n')
+    logger.info(f'Loading pre-trained mapping from: {params.pretrained_mapping}')
+    
+    # Load the model directly into the mapping
+    assert os.path.isfile(params.pretrained_mapping), f"Cannot find mapping file: {params.pretrained_mapping}"
+    to_reload = torch.from_numpy(torch.load(params.pretrained_mapping))
+    W = trainer.mapping.weight.data
+    assert to_reload.size() == W.size(), f"Model size mismatch: {to_reload.size()} vs {W.size()}"
+    W.copy_(to_reload.type_as(W))
+    
+    logger.info(f'Pre-trained mapping loaded successfully')
+    
+    # Optionally evaluate the model
+    to_log = OrderedDict({'pretrained': True})
+    evaluator.all_eval(to_log)
+    logger.info("__log__:%s" % json.dumps(to_log))
+elif params.skip_training:
+    # If skip_training is True but no model path is provided, reload the best model from the current experiment path
+    logger.info('----> RELOADING BEST MODEL <----\n\n')
+    trainer.reload_best()
+
 # export embeddings
 if params.export:
-    trainer.reload_best()
+    if not params.skip_training:
+        trainer.reload_best()
     # trainer.export() # Original export call
     # Call export and capture the returned embeddings and dictionaries
     mapped_src_emb_tensor, normalized_tgt_emb_tensor, src_dico, tgt_dico = trainer.export()
@@ -453,7 +484,8 @@ if params.export:
         logger.info("Preparing data for final alignment visualization...")
         try:
             from visualize_aligned_embeddings_pairs import visualize_aligned_pairs
-            
+            mapped_src_emb_tensor = mapped_src_emb_tensor.cpu()
+            normalized_tgt_emb_tensor = normalized_tgt_emb_tensor.cpu()
             # Convert tensors and Dico to the required dictionary format
             src_vectors = {word: mapped_src_emb_tensor[i].numpy() for i, word in src_dico.id2word.items() if i < len(mapped_src_emb_tensor)}
             tgt_vectors = {word: normalized_tgt_emb_tensor[i].numpy() for i, word in tgt_dico.id2word.items() if i < len(normalized_tgt_emb_tensor)}

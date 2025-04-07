@@ -307,7 +307,7 @@ class Trainer(object):
         with torch.no_grad():
             for i, k in enumerate(range(0, len(src_emb), bs)):
                 x = Variable(src_emb[k:k + bs])
-                src_emb[k:k + bs] = self.mapping(x.cuda() if params.cuda else x).data.cpu()
+                src_emb[k:k + bs] = self.mapping(x.cuda() if params.cuda else x).data##.cpu()
 
         logger.info("Writing embeddings to the disk ...")
         # write embeddings to the disk
