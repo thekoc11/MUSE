@@ -294,8 +294,8 @@ class Trainer(object):
 
         # load all embeddings
         logger.info("Reloading all embeddings for mapping ...")
-        params.src_dico, src_emb = load_embeddings(params, source=True, full_vocab=True)
-        params.tgt_dico, tgt_emb = load_embeddings(params, source=False, full_vocab=True)
+        params.src_dico, src_emb = load_embeddings(params, source=True, full_vocab=False)
+        params.tgt_dico, tgt_emb = load_embeddings(params, source=False, full_vocab=False)
 
         # apply same normalization as during training
         normalize_embeddings(src_emb, params.normalize_embeddings, mean=params.src_mean)
@@ -309,5 +309,11 @@ class Trainer(object):
                 x = Variable(src_emb[k:k + bs])
                 src_emb[k:k + bs] = self.mapping(x.cuda() if params.cuda else x).data.cpu()
 
+        logger.info("Writing embeddings to the disk ...")
         # write embeddings to the disk
         export_embeddings(src_emb, tgt_emb, params)
+        
+        # Return the processed embeddings and dictionaries
+        logger.info("Returning mapped source and normalized target embeddings.")
+        return src_emb, tgt_emb, params.src_dico, params.tgt_dico
+        

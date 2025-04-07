@@ -36,6 +36,7 @@ VALIDATION_METRIC = 'mean_cosine-csls_knn_10-S2T-10000'
 training_metrics = {
     'word_translation_accuracy': [],
     'discriminator_accuracy': [],
+    'discriminator_loss': [],
     'unsupervised_criterion': [],
     'epochs': []
 }
@@ -59,23 +60,22 @@ def update_iteration_metrics(n_epoch, n_iter, stats):
     
     training_metrics['epochs'].append(fractional_epoch)
     
+    # We only log actual discriminator accuracy and unsupervised criterion at epoch end.
+    # For consistency during iterations, we append the loss or None for accuracy/criterion.
+    
     # Add discriminator loss 
     if 'DIS_COSTS' in stats and stats['DIS_COSTS']:
         dis_cost = np.mean(stats['DIS_COSTS'])
-        training_metrics['discriminator_accuracy'].append(dis_cost * 100)
+        training_metrics['discriminator_loss'].append(dis_cost)
     else:
-        # Use previous value or 0
-        training_metrics['discriminator_accuracy'].append(
-            training_metrics['discriminator_accuracy'][-1] if training_metrics['discriminator_accuracy'] else 0
-        )
+        training_metrics['discriminator_loss'].append(None) # Append None if no cost data
     
-    # For metrics we don't have during iterations, just use the previous values or 0
-    training_metrics['word_translation_accuracy'].append(
-        training_metrics['word_translation_accuracy'][-1] if training_metrics['word_translation_accuracy'] else 0
-    )
-    training_metrics['unsupervised_criterion'].append(
-        training_metrics['unsupervised_criterion'][-1] if training_metrics['unsupervised_criterion'] else 0
-    )
+    # Discriminator accuracy - use last known value
+    training_metrics['discriminator_accuracy'].append(None)
+    # Word translation accuracy - use last known value
+    training_metrics['word_translation_accuracy'].append(None)
+    # Unsupervised criterion - use last known value
+    training_metrics['unsupervised_criterion'].append(None)
     
     # Save to file for Dash app
     save_metrics()
@@ -156,7 +156,7 @@ parser.add_argument("--exp_path", type=str, default="", help="Where to store exp
 parser.add_argument("--exp_name", type=str, default="debug", help="Experiment name")
 parser.add_argument("--exp_id", type=str, default="", help="Experiment ID")
 parser.add_argument("--cuda", type=bool_flag, default=True, help="Run on GPU")
-parser.add_argument("--export", type=str, default="txt", help="Export embeddings after training (txt / pth)")
+parser.add_argument("--export", type=str, default="pth", help="Export embeddings after training (txt / pth)")
 # data
 parser.add_argument("--src_lang", type=str, default='en', help="Source language")
 parser.add_argument("--tgt_lang", type=str, default='es', help="Target language")
@@ -185,6 +185,7 @@ parser.add_argument("--dis_optimizer", type=str, default="sgd,lr=0.05", help="Di
 parser.add_argument("--lr_decay", type=float, default=0.98, help="Learning rate decay (SGD only)")
 parser.add_argument("--min_lr", type=float, default=1e-6, help="Minimum learning rate (SGD only)")
 parser.add_argument("--lr_shrink", type=float, default=0.5, help="Shrink the learning rate if the validation metric decreases (1 to disable)")
+parser.add_argument("--early_stopping_patience", type=int, default=0, help="Stop training if validation metric doesn't improve for this many epochs (0 to disable)")
 # training refinement
 parser.add_argument("--n_refinement", type=int, default=5, help="Number of refinement iterations (0 to disable the refinement procedure)")
 # dictionary creation parameters (for refinement)
@@ -206,6 +207,11 @@ parser.add_argument("--plot_output_dir", type=str, default="plots", help="Direct
 parser.add_argument("--eval_frequency", type=int, default=500, help="Frequency of evaluation during training")
 # evaluation dictionary handling
 parser.add_argument("--skip_validation", type=bool_flag, default=False, help="Skip validation if dictionary not found")
+# final alignment visualization params
+parser.add_argument("--visualize_final_alignment", type=bool_flag, default=True, help="Visualize word pair alignment after training")
+parser.add_argument("--viz_dictionary", type=str, default="", help="Path to dictionary for visualization (if different from dico_eval)")
+parser.add_argument("--viz_max_pairs", type=int, default=200, help="Maximum number of pairs for visualization")
+parser.add_argument("--viz_output_dir", type=str, default="plots", help="Directory to save visualization plots")
 
 
 # parse parameters
@@ -243,6 +249,9 @@ Learning loop for Adversarial Training
 """
 if params.adversarial:
     logger.info('----> ADVERSARIAL TRAINING <----\n\n')
+
+    best_valid_metric = -float('inf')
+    patience_counter = 0
 
     # training loop
     for n_epoch in range(params.n_epochs):
@@ -294,31 +303,39 @@ if params.adversarial:
             # Print available metrics for debugging
             logger.info("Available metrics: %s" % list(to_log.keys()))
             
+            # Append None for discriminator loss at epoch end
+            training_metrics['discriminator_loss'].append(None)
+            
             # Create a clean integer epoch entry for epoch boundaries
             training_metrics['epochs'].append(float(n_epoch + 1))
             
-            # Word translation accuracy - use mean_cosine from validation metric
-            if VALIDATION_METRIC in to_log:
-                training_metrics['word_translation_accuracy'].append(to_log[VALIDATION_METRIC] * 100)
+            # Key for actual word translation accuracy P@1 using CSLS
+            WORD_TRANSLATION_METRIC_KEY = 'precision_at_1-csls_knn_10'
+            
+            # Word translation accuracy - use the specific precision metric
+            if WORD_TRANSLATION_METRIC_KEY in to_log:
+                training_metrics['word_translation_accuracy'].append(to_log[WORD_TRANSLATION_METRIC_KEY]) # Already percentage
             else:
+                logger.warning(f"{WORD_TRANSLATION_METRIC_KEY} not found in logs for epoch {n_epoch}. Using previous value or 0.")
                 training_metrics['word_translation_accuracy'].append(
                     training_metrics['word_translation_accuracy'][-1] if training_metrics['word_translation_accuracy'] else 0
                 )
             
             # Discriminator accuracy
             if 'dis_accu' in to_log:
-                training_metrics['discriminator_accuracy'].append(to_log['dis_accu'] * 100)
+                training_metrics['discriminator_accuracy'].append(to_log['dis_accu'] * 100) # Convert to percentage
             else:
+                logger.warning(f"dis_accu not found in logs for epoch {n_epoch}. Using previous value or 0.")
                 training_metrics['discriminator_accuracy'].append(
                     training_metrics['discriminator_accuracy'][-1] if training_metrics['discriminator_accuracy'] else 0
                 )
             
-            # Unsupervised criterion - use the same metric as word translation accuracy
-            # This is the mean cosine similarity between translations using CSLS
-            # which is exactly what the paper describes as the unsupervised criterion
+            # Unsupervised criterion - use the VALIDATION_METRIC (mean cosine similarity)
+            # Multiply by 100 to make it a percentage-like scale for plotting
             if VALIDATION_METRIC in to_log:
-                training_metrics['unsupervised_criterion'].append(to_log[VALIDATION_METRIC] * 100)
+                training_metrics['unsupervised_criterion'].append(to_log[VALIDATION_METRIC] * 100) 
             else:
+                logger.warning(f"{VALIDATION_METRIC} not found in logs for epoch {n_epoch}. Using previous value or 0.")
                 training_metrics['unsupervised_criterion'].append(
                     training_metrics['unsupervised_criterion'][-1] if training_metrics['unsupervised_criterion'] else 0
                 )
@@ -331,6 +348,20 @@ if params.adversarial:
         if trainer.map_optimizer.param_groups[0]['lr'] < params.min_lr:
             logger.info('Learning rate < 1e-6. BREAK.')
             break
+
+        # Check for early stopping
+        if params.early_stopping_patience > 0:
+            current_valid_metric = to_log.get(VALIDATION_METRIC, -float('inf'))
+            if current_valid_metric > best_valid_metric:
+                best_valid_metric = current_valid_metric
+                patience_counter = 0
+                logger.info(f"Validation metric improved to {best_valid_metric:.4f}. Resetting patience.")
+            else:
+                patience_counter += 1
+                logger.info(f"Validation metric did not improve ({current_valid_metric:.4f} vs best {best_valid_metric:.4f}). Patience: {patience_counter}/{params.early_stopping_patience}")
+                if patience_counter >= params.early_stopping_patience:
+                    logger.info(f"Early stopping triggered after {patience_counter} epochs without improvement.")
+                    break
 
 
 """
@@ -366,32 +397,42 @@ if params.n_refinement > 0:
             # Print available metrics for debugging
             logger.info("Refinement metrics: %s" % list(to_log.keys()))
             
+            # Append None for discriminator loss during refinement
+            training_metrics['discriminator_loss'].append(None)
+            
             # For refinement, we'll add to the same epochs list
             # Use integer epochs to clearly distinguish between phases
             last_epoch = int(max(training_metrics['epochs'])) if training_metrics['epochs'] else 0
             current_epoch = last_epoch + n_iter + 1
             training_metrics['epochs'].append(float(current_epoch))
             
+            # Key for actual word translation accuracy P@1 using CSLS
+            WORD_TRANSLATION_METRIC_KEY = 'precision_at_1-csls_knn_10'
+            
             # Word translation accuracy
-            if VALIDATION_METRIC in to_log:
-                training_metrics['word_translation_accuracy'].append(to_log[VALIDATION_METRIC] * 100)
+            if WORD_TRANSLATION_METRIC_KEY in to_log:
+                training_metrics['word_translation_accuracy'].append(to_log[WORD_TRANSLATION_METRIC_KEY]) # Already percentage
             else:
+                logger.warning(f"{WORD_TRANSLATION_METRIC_KEY} not found in logs for refinement iter {n_iter}. Using previous value or 0.")
                 training_metrics['word_translation_accuracy'].append(
                     training_metrics['word_translation_accuracy'][-1] if training_metrics['word_translation_accuracy'] else 0
                 )
             
-            # Discriminator accuracy (usually not applicable in refinement)
+            # Discriminator accuracy (usually not applicable/logged in refinement, use fallback)
             if 'dis_accu' in to_log:
-                training_metrics['discriminator_accuracy'].append(to_log['dis_accu'] * 100)
+                training_metrics['discriminator_accuracy'].append(to_log['dis_accu'] * 100) # Convert to percentage
             else:
+                # Use previous value or a placeholder (e.g., last known value or 0)
                 training_metrics['discriminator_accuracy'].append(
                     training_metrics['discriminator_accuracy'][-1] if training_metrics['discriminator_accuracy'] else 0
                 )
             
-            # Unsupervised criterion - use the same VALIDATION_METRIC as in training
+            # Unsupervised criterion - use the VALIDATION_METRIC (mean cosine similarity)
+            # Multiply by 100 to make it a percentage-like scale for plotting
             if VALIDATION_METRIC in to_log:
                 training_metrics['unsupervised_criterion'].append(to_log[VALIDATION_METRIC] * 100)
             else:
+                logger.warning(f"{VALIDATION_METRIC} not found in logs for refinement iter {n_iter}. Using previous value or 0.")
                 training_metrics['unsupervised_criterion'].append(
                     training_metrics['unsupervised_criterion'][-1] if training_metrics['unsupervised_criterion'] else 0
                 )
@@ -403,7 +444,56 @@ if params.n_refinement > 0:
 # export embeddings
 if params.export:
     trainer.reload_best()
-    trainer.export()
+    # trainer.export() # Original export call
+    # Call export and capture the returned embeddings and dictionaries
+    mapped_src_emb_tensor, normalized_tgt_emb_tensor, src_dico, tgt_dico = trainer.export()
+    
+    # Visualize final alignment if requested
+    if params.visualize_final_alignment:
+        logger.info("Preparing data for final alignment visualization...")
+        try:
+            from visualize_aligned_embeddings_pairs import visualize_aligned_pairs
+            
+            # Convert tensors and Dico to the required dictionary format
+            src_vectors = {word: mapped_src_emb_tensor[i].numpy() for i, word in src_dico.id2word.items() if i < len(mapped_src_emb_tensor)}
+            tgt_vectors = {word: normalized_tgt_emb_tensor[i].numpy() for i, word in tgt_dico.id2word.items() if i < len(normalized_tgt_emb_tensor)}
+            
+            # Determine visualization dictionary path
+            viz_dict_path = params.viz_dictionary
+            if not viz_dict_path or not os.path.isfile(viz_dict_path):
+                logger.warning(f"Visualization dictionary '{viz_dict_path}' not found or not specified. Falling back to evaluation dictionary: '{params.dico_eval}'")
+                if params.dico_eval == 'default':
+                    # Construct default path if needed
+                    default_dict_file = f"{params.src_lang}-{params.tgt_lang}.0-5000.txt"
+                    viz_dict_path = os.path.join("data", "dictionaries", default_dict_file)
+                else:
+                    viz_dict_path = params.dico_eval
+            
+            if not os.path.isfile(viz_dict_path):
+                logger.error(f"Could not find a valid dictionary for visualization: '{viz_dict_path}'. Skipping visualization.")
+            else:
+                # Prepare output path
+                if not os.path.exists(params.viz_output_dir):
+                    os.makedirs(params.viz_output_dir)
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                viz_output_file = os.path.join(params.viz_output_dir, f"aligned_pairs_{params.src_lang}-{params.tgt_lang}_{timestamp}.html")
+                
+                # Call the visualization function
+                visualize_aligned_pairs(
+                    src_lang=params.src_lang,
+                    tgt_lang=params.tgt_lang,
+                    src_vectors=src_vectors, 
+                    tgt_vectors=tgt_vectors,
+                    dict_path=viz_dict_path,
+                    output_path=viz_output_file,
+                    max_pairs=params.viz_max_pairs
+                )
+                logger.info(f"Final alignment visualization saved to {viz_output_file}")
+
+        except ImportError:
+            logger.error("Could not import 'visualize_aligned_pairs'. Skipping visualization. Ensure 'visualize_aligned_embeddings_pairs.py' is accessible.")
+        except Exception as e:
+            logger.error(f"An error occurred during final alignment visualization: {e}")
 
 # Save static plot at the end of training
 if params.plot_results and len(training_metrics['epochs']) > 0:

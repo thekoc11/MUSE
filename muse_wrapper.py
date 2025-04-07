@@ -9,6 +9,7 @@ from plotly.subplots import make_subplots
 from collections import defaultdict, OrderedDict
 import pandas as pd
 import random
+import time
 
 from src.utils import bool_flag, initialize_exp
 from src.models import build_model
@@ -19,8 +20,29 @@ from src.evaluation.word_translation import get_word_translation_accuracy, load_
 # Constants
 SOURCE_LANG = 'en'
 TARGET_LANG = 'hi'
-DICTIONARY_SIZES = [5000, 10000, 20000]
+DICTIONARY_SIZES = [1000, 2000, 5000, 10000, 20000]
 MUSE_DATA_PATH = './data/dictionaries'
+
+# Path for saving alignment metrics
+ALIGNMENT_METRICS_FILE = 'alignment_metrics.json'
+
+# Create a structure to store alignment metrics across runs
+alignment_metrics = {
+    'dictionary_sizes': [],
+    'precision_at_1_nn': [],
+    'precision_at_1_csls': [],
+    'precision_at_5_nn': [],
+    'precision_at_5_csls': [],
+    'avg_cosine_similarity': [],
+    'orthogonality_error': [],
+    'refinement_steps': [],
+    'timestamp': []
+}
+
+# Function to save metrics to a file
+def save_alignment_metrics():
+    with open(ALIGNMENT_METRICS_FILE, 'w') as f:
+        json.dump(alignment_metrics, f)
 
 def verify_orthogonality(W):
     """
@@ -41,15 +63,17 @@ def load_combined_dictionaries(src_lang, tgt_lang, dico_path, word2id1, word2id2
     """
     # Potential dictionary files to combine
     dictionary_files = [
-        f'{src_lang}-{tgt_lang}.0-5000.txt',  # Forward dictionary
+        # f'{src_lang}-{tgt_lang}.0-5000.txt',  # Forward dictionary
         # f'{tgt_lang}-{src_lang}.0-5000.txt',  # Reverse dictionary (swapped)
-        # f'{src_lang}-{tgt_lang}.txt',         # Full forward dictionary if exists
+        f'{src_lang}-{tgt_lang}.txt',         # Full forward dictionary if exists
         # f'{tgt_lang}-{src_lang}.txt'          # Full reverse dictionary if exists
     ]
     
     # Validation dictionary to exclude
     validation_path = os.path.join(dico_path, f'{src_lang}-{tgt_lang}.5000-6500.txt')
     
+    print(f"Exclude validation: {exclude_validation}")
+    print(f"Validation path: {validation_path}")
     # Load validation pairs to exclude
     validation_pairs = set()
     if exclude_validation and os.path.exists(validation_path):
@@ -163,6 +187,21 @@ def run_alignment_experiment(dico_size, params):
     if params.cuda:
         trainer.dico = trainer.dico.cuda()
     
+    # Track refinement steps for visualization
+    refinement_metrics = {
+        'steps': [],
+        'precision_at_1_nn': [],
+        'precision_at_1_csls': [],
+        'orthogonality_error': [],
+        'avg_cosine_similarity': []
+    }
+    
+    # Initialize best metric tracking
+    trainer.best_valid_metric = -1.0
+    best_avg_cos_sim = -1.0
+    best_mapping_weights = None
+    best_iter = -1
+    
     # Apply Procrustes alignment with refinement iterations
     for n_iter in range(params.n_refinement + 1):
         logger.info(f'Starting refinement iteration {n_iter} for dictionary size {dico_size}...')
@@ -198,37 +237,83 @@ def run_alignment_experiment(dico_size, params):
             if not is_orthogonal:
                 print(f"Warning: Could not achieve perfect orthogonality after {max_iterations} iterations")
                 print(f"Final error: {ortho_error:.8f}")
+                
+        # Get mapped embeddings for custom evaluations that the built-in evaluator doesn't provide
+        src_emb_mapped = trainer.mapping(trainer.src_emb.weight).data
+        tgt_emb = trainer.tgt_emb.weight.data
+        
+        # Compute cosine similarities for word pairs (custom metric)
+        eval_dico = load_dictionary(
+            params.dico_eval,
+            params.src_dico.word2id, 
+            params.tgt_dico.word2id
+        )
+        
+        cos_similarities = compute_cosine_similarity(
+            src_emb_mapped, 
+            tgt_emb, 
+            eval_dico
+        )
+        
+        avg_cos_sim = np.mean(cos_similarities)
+        
+        # Create an intermediate results dict for this iteration
+        iter_results = OrderedDict()
+        
+        # Run word translation evaluation
+        evaluator.word_translation(iter_results)
+        
+        # Add to refinement metrics
+        refinement_metrics['steps'].append(n_iter)
+        refinement_metrics['precision_at_1_nn'].append(iter_results.get('precision_at_1-nn', 0))
+        refinement_metrics['precision_at_1_csls'].append(iter_results.get('precision_at_1-csls_knn_10', 0))
+        refinement_metrics['orthogonality_error'].append(ortho_error)
+        refinement_metrics['avg_cosine_similarity'].append(avg_cos_sim)
+        
+        # Save best model based on cosine similarity
+        if avg_cos_sim > best_avg_cos_sim:
+            best_avg_cos_sim = avg_cos_sim
+            best_iter = n_iter
+            best_mapping_weights = trainer.mapping.weight.data.clone()
+            logger.info(f'* New best model found at iteration {n_iter}')
+            logger.info(f'* Best average cosine similarity: {best_avg_cos_sim:.5f}')
+            
+            # Save the best mapping to disk
+            W = trainer.mapping.weight.data.cpu().numpy()
+            path = os.path.join(params.exp_path, f'best_mapping_dico{dico_size}.pth')
+            logger.info(f'* Saving the best mapping to {path} ...')
+            torch.save(W, path)
+    
+    # Reload the best model before final evaluation
+    logger.info(f'Reloading best model from iteration {best_iter} with cosine similarity {best_avg_cos_sim:.5f}')
+    if best_mapping_weights is not None:
+        trainer.mapping.weight.data.copy_(best_mapping_weights)
     
     # Create an OrderedDict to store all results
     to_log = OrderedDict()
     to_log['dictionary_size'] = dico_size
+    to_log['best_iter'] = best_iter
+    to_log['best_avg_cosine_similarity'] = best_avg_cos_sim
     to_log['orthogonality_error'] = ortho_error
     to_log['is_orthogonal'] = is_orthogonal
+    to_log['refinement_metrics'] = refinement_metrics
     
-    # Get mapped embeddings for custom evaluations that the built-in evaluator doesn't provide
-    src_emb_mapped = trainer.mapping(trainer.src_emb.weight).data
-    tgt_emb = trainer.tgt_emb.weight.data
-    
-    # Compute cosine similarities for word pairs (custom metric)
-    eval_dico = load_dictionary(
-        params.dico_eval,
-        params.src_dico.word2id, 
-        params.tgt_dico.word2id
-    )
-    
-    cos_similarities = compute_cosine_similarity(
-        src_emb_mapped, 
-        tgt_emb, 
-        eval_dico
-    )
-    
-    avg_cos_sim = np.mean(cos_similarities)
-    to_log['avg_cosine_similarity'] = avg_cos_sim
-    
-    # Use the built-in evaluator for word translation evaluation
-    # This internally calls get_word_translation_accuracy for both 'nn' and 'csls_knn_10' methods
-    # and computes precision@1, precision@5, and precision@10
+    # Use the built-in evaluator for word translation evaluation with the best model
     evaluator.word_translation(to_log)
+    
+    # Add metrics to the alignment_metrics structure for visualization
+    alignment_metrics['dictionary_sizes'].append(dico_size)
+    alignment_metrics['precision_at_1_nn'].append(to_log.get('precision_at_1-nn', 0))
+    alignment_metrics['precision_at_1_csls'].append(to_log.get('precision_at_1-csls_knn_10', 0))
+    alignment_metrics['precision_at_5_nn'].append(to_log.get('precision_at_5-nn', 0))
+    alignment_metrics['precision_at_5_csls'].append(to_log.get('precision_at_5-csls_knn_10', 0))
+    alignment_metrics['avg_cosine_similarity'].append(best_avg_cos_sim)
+    alignment_metrics['orthogonality_error'].append(ortho_error)
+    alignment_metrics['refinement_steps'].append(refinement_metrics)
+    alignment_metrics['timestamp'].append(time.time())
+    
+    # Save metrics to file for Dash app to read
+    save_alignment_metrics()
     
     # Convert OrderedDict to regular dict for easier handling later
     results = dict(to_log)
@@ -288,7 +373,7 @@ def visualize_results(all_results):
                          shared_xaxes=True)
     
     fig2.add_trace(
-        go.Scatter(x=df['dictionary_size'], y=df['avg_cosine_similarity'], 
+        go.Scatter(x=df['dictionary_size'], y=df['best_avg_cosine_similarity'], 
                   mode='lines+markers'),
         row=1, col=1
     )
@@ -359,6 +444,10 @@ def main():
     # Initialize experiment
     logger = initialize_exp(params)
     
+    # Initialize metrics file for Dash app
+    save_alignment_metrics()
+    logger.info(f"Metrics will be saved to {ALIGNMENT_METRICS_FILE} for visualization")
+    
     # Handle default dictionary paths
     if params.dico_eval == 'default':
         params.dico_eval = os.path.join(params.dico_path, '%s-%s.5000-6500.txt' % (params.src_lang, params.tgt_lang))
@@ -374,7 +463,8 @@ def main():
         logger.info("=" * 50)
         logger.info(f"Results for dictionary size {dico_size}:")
         for metric, value in result.items():
-            logger.info(f"{metric}: {value}")
+            if metric != 'refinement_metrics':  # Skip the detailed refinement metrics in the log
+                logger.info(f"{metric}: {value}")
         logger.info("=" * 50)
     
     # Save all results

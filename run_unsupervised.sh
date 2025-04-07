@@ -4,7 +4,7 @@
 mkdir -p unsupervised_logs
 
 # Base command with the weaker discriminator as baseline
-BASE_CMD="python -u unsupervised.py --batch_size 32 --normalize_embeddings center,renorm --dis_dropout 0.3 --dis_input_dropout 0.3 --dis_steps 3 --dis_most_frequent 50000 --map_beta 0.01"
+BASE_CMD="python -u unsupervised.py --batch_size 32 --normalize_embeddings center,renorm --dis_dropout 0.4 --dis_input_dropout 0.3 --dis_steps 3 --dis_most_frequent 100000 --map_beta 0.01"
 
 # Check if we should use CPU instead of GPU
 USE_CPU=false
@@ -146,7 +146,7 @@ case $EXPERIMENT_CHOICE in
     14)
         # Hindi Latin with weak discriminator
         echo "Testing with weak discriminator for Hindi in Latin script..."
-        run_experiment "hindi_latin_weak_disc" "$BASE_CMD --src_lang en --tgt_lang hi_latin --src_emb data/wiki.en.vec --tgt_emb data/wiki.hi_latin.vec --n_refinement 5 --n_epochs 8 --epoch_size 500000 --map_optimizer sgd,lr=0.2 --dis_optimizer sgd,lr=0.05 --dico_eval data/dictionaries/en-hi_latin.5000-6500_iast.txt"
+        run_experiment "hindi_latin_weak_disc" "$BASE_CMD --src_lang en --tgt_lang hi_latin --src_emb data/wiki.en.vec --tgt_emb data/wiki.hi_latin.vec --n_refinement 8 --n_epochs 25 --epoch_size 500000 --map_optimizer sgd,lr=0.2 --dis_optimizer sgd,lr=0.05 --dico_eval data/dictionaries/en-hi_latin.5000-6500_iast.txt --early_stopping_patience 5"
         ;;
     15)
         # Hindi Latin with extended training
